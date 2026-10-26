@@ -156,7 +156,9 @@ $('#reset-demo').addEventListener('click',()=>{state={applications:[],bookings:[
     var points = [], width = 0, height = 0, frame = 0, born = 0, last = 0;
     var inView = true, initialized = false, pointer = { x: -9999, y: -9999 };
     var colors = ['#a84b20', '#b95320', '#cc6b24', '#d27d29', '#df9c38'];
-    function stop() { if (frame) cancelAnimationFrame(frame); frame = 0; }
+    var fadeLevels = 32, groups = [];
+    for (var groupIndex = 0; groupIndex < colors.length * fadeLevels; groupIndex++) groups.push([]);
+    function stop() { if (frame) cancelAnimationFrame(frame); frame = 0; last = 0; }
     function canRun() { return !reduced.matches && inView && !document.hidden && points.length; }
     function start() { if (!frame && canRun()) frame = requestAnimationFrame(draw); }
     function setup() {
@@ -184,7 +186,7 @@ $('#reset-demo').addEventListener('click',()=>{state={applications:[],bookings:[
           sy: height * .5 + (Math.random() - .5) * height * 1.6,
           delay: Math.random() * 280, phase: Math.random() * Math.PI * 2,
           size: coarse.matches ? 1.7 : 1.35 + Math.random() * .35,
-          color: colors[Math.min(4, Math.floor(x / width * 5))] });
+          tone: Math.min(4, Math.floor(x / width * 5)) });
       }
       born = performance.now() - (initialized ? 1900 : 0); initialized = true; last = 0;
       root.dataset.particleCount = String(points.length);
@@ -195,39 +197,64 @@ $('#reset-demo').addEventListener('click',()=>{state={applications:[],bookings:[
     function draw(now) {
       frame = 0;
       if (!canRun()) { root.dataset.motionState = reduced.matches ? 'reduced' : 'paused'; return; }
-      // Thirty frames a second is sufficient for the gentle idle motion.
-      if (now - last < 30) { start(); return; } last = now;
+      // Paint on every display refresh. Time-based damping preserves the original return speed.
+      var delta = last ? Math.min((now - last) / 1000, .05) : 1 / 60;
+      var follow = 1 - Math.pow(.82, delta * 30);
+      last = now;
       ctx.clearRect(0, 0, width, height);
-      var age = now - born, calm = coarse.matches;
-      points.forEach(function (p) {
+      var age = now - born, calm = coarse.matches, drift = calm ? .4 : .55;
+      for (var bucket = 0; bucket < groups.length; bucket++) groups[bucket].length = 0;
+      for (var i = 0; i < points.length; i++) {
+        var p = points[i];
         var t = Math.max(0, Math.min(1, (age - p.delay) / (calm ? 900 : 1350)));
-        var ease = 1 - Math.pow(1 - t, 3);
+        var remaining = 1 - t, ease = 1 - remaining * remaining * remaining;
         var px = p.sx + (p.tx - p.sx) * ease;
         var py = p.sy + (p.ty - p.sy) * ease;
-        if (!calm) { px += Math.sin(now * .00055 + p.phase) * .55; py += Math.cos(now * .0006 + p.phase) * .55; }
+        px += Math.sin(now * .00055 + p.phase) * drift;
+        py += Math.cos(now * .0006 + p.phase) * drift;
         var pushX = 0, pushY = 0;
-        if (!calm && t > .8) {
-          var dx = px - pointer.x, dy = py - pointer.y, distance = Math.sqrt(dx * dx + dy * dy);
-          if (distance < 100 && distance > .05) {
-            var force = Math.pow(1 - distance / 100, 2) * 32;
+        if (t > .8) {
+          var dx = px - pointer.x, dy = py - pointer.y, distanceSquared = dx * dx + dy * dy;
+          if (distanceSquared < 10000 && distanceSquared > .0025) {
+            var distance = Math.sqrt(distanceSquared), falloff = 1 - distance / 100;
+            var force = falloff * falloff * 32;
             pushX = dx / distance * force; pushY = dy / distance * force;
           }
         }
-        p.ox = (p.ox || 0) + (pushX - (p.ox || 0)) * .18;
-        p.oy = (p.oy || 0) + (pushY - (p.oy || 0)) * .18;
+        p.ox = (p.ox || 0) + (pushX - (p.ox || 0)) * follow;
+        p.oy = (p.oy || 0) + (pushY - (p.oy || 0)) * follow;
         px += p.ox; py += p.oy;
-        ctx.globalAlpha = Math.min(1, t * 2.5);
-        ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(px, py, p.size, 0, Math.PI * 2); ctx.fill();
-      });
+        p.drawX = px; p.drawY = py;
+        var fade = Math.min(fadeLevels - 1, Math.round(t * 2.5 * (fadeLevels - 1)));
+        if (fade > 0) groups[p.tone * fadeLevels + fade].push(p);
+      }
+      // Reuse paths for each original color/opacity instead of thousands of fill calls.
+      for (var g = 0; g < groups.length; g++) {
+        var group = groups[g]; if (!group.length) continue;
+        ctx.fillStyle = colors[Math.floor(g / fadeLevels)];
+        ctx.globalAlpha = (g % fadeLevels) / (fadeLevels - 1);
+        ctx.beginPath();
+        for (var j = 0; j < group.length; j++) {
+          var dot = group[j];
+          ctx.moveTo(dot.drawX + dot.size, dot.drawY);
+          ctx.arc(dot.drawX, dot.drawY, dot.size, 0, Math.PI * 2);
+        }
+        ctx.fill();
+      }
       ctx.globalAlpha = 1;
       root.dataset.motionState = age < 1700 ? 'assembling' : 'idle';
       start();
     }
-    root.addEventListener('pointermove', function (event) {
-      if (coarse.matches || event.pointerType === 'touch' || reduced.matches) return;
+    function trackPointer(event) {
+      if (reduced.matches) return;
       var rect = root.getBoundingClientRect(); pointer.x = event.clientX - rect.left; pointer.y = event.clientY - rect.top;
-    }, { passive: true });
-    root.addEventListener('pointerleave', function () { pointer.x = pointer.y = -9999; });
+    }
+    function clearPointer() { pointer.x = pointer.y = -9999; }
+    root.addEventListener('pointermove', trackPointer, { passive: true });
+    root.addEventListener('pointerdown', trackPointer, { passive: true });
+    root.addEventListener('pointerleave', clearPointer, { passive: true });
+    root.addEventListener('pointerup', function (event) { if (event.pointerType !== 'mouse') clearPointer(); }, { passive: true });
+    root.addEventListener('pointercancel', clearPointer, { passive: true });
     if ('IntersectionObserver' in window) new IntersectionObserver(function (entries) {
       inView = entries[0].isIntersecting;
       if (inView) start(); else { stop(); root.dataset.motionState = 'paused'; }
